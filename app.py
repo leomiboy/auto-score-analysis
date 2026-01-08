@@ -102,7 +102,7 @@ def get_ai_advice(api_key, student_name, error_data):
     """呼叫 Gemini 生成建議 (使用 GEM 嚴格版 Prompt)"""
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-3-flash')
         
         # 這是您指定的 GEM 嚴格版提示詞
         prompt = f"""
