@@ -103,7 +103,7 @@ def get_ai_advice(api_key, student_name, error_data):
     """呼叫 Gemini 生成建議"""
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         
         prompt = f"""
         你是一位專業的國中會考升學輔導專家。請根據以下學生的錯題數據，撰寫一份精準的讀書建議。
