@@ -9,11 +9,12 @@ import zipfile
 import time
 
 # ==========================================
-# 專案：班級讀書建議生成器 (Word 嚴格版)
+# 專案：班級讀書建議生成器 (Word 嚴格版 + 模型選擇)
 # 功能：
 # 1. 讀取 Excel (5分頁)
-# 2. AI 生成建議 (使用 GEM 嚴格提示詞)
-# 3. 產出 Word 檔 (.docx)
+# 2. 可選擇 Gemini 模型
+# 3. AI 生成建議 (GEM 嚴格提示詞)
+# 4. 產出 Word 檔 (.docx)
 # ==========================================
 
 # --- 1. 網頁設定 ---
@@ -21,7 +22,7 @@ st.set_page_config(page_title="班級讀書建議生成器", layout="wide")
 st.title("🎓 班級錯題分析與讀書建議生成器 (Word版)")
 st.markdown("""
 此工具協助老師快速生成全班學生的個別化讀書建議 **Word 檔**。
-1. 輸入您的 **Gemini API Key**。
+1. 輸入您的 **Gemini API Key** 並 **選擇模型**。
 2. 上傳 **Excel 檔案** (需包含 國文, 英文, 數學, 社會, 自然 5個分頁)。
 3. 系統將自動分析並打包 ZIP 下載。
 """)
@@ -98,13 +99,14 @@ def process_excel_data(uploaded_file):
         
     return all_students_data, None
 
-def get_ai_advice(api_key, student_name, error_data):
+def get_ai_advice(api_key, model_name, student_name, error_data):
     """呼叫 Gemini 生成建議 (使用 GEM 嚴格版 Prompt)"""
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-3-flash')
+        # 使用使用者選擇的模型
+        model = genai.GenerativeModel(model_name)
         
-        # 這是您指定的 GEM 嚴格版提示詞
+        # 這是 GEM 嚴格版提示詞
         prompt = f"""
         你是一位專業的台灣國中教育會考升學輔導專家。你的任務是讀取以下學生的錯題數據（九年級第2次複習考，範圍1-4冊），並生成一份精準的讀書建議報告。
 
@@ -169,7 +171,7 @@ def get_ai_advice(api_key, student_name, error_data):
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"AI 分析連線失敗: {e} (請檢查 API Key 是否正確)"
+        return f"AI 分析連線失敗: {e} (請檢查 API Key 或模型權限)"
 
 def create_word(student_name, ai_advice):
     """
@@ -182,7 +184,7 @@ def create_word(student_name, ai_advice):
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
     # 2. 處理 AI 建議內容
-    # 簡單清理 Markdown 符號，讓 Word 看起來乾淨點
+    # 簡單清理 Markdown 符號
     clean_text = ai_advice.replace('**', '').replace('## ', '').replace('### ', '')
     
     for paragraph_text in clean_text.split('\n'):
@@ -198,10 +200,24 @@ def create_word(student_name, ai_advice):
 
 # --- 4. 介面互動邏輯 ---
 
-# 側邊欄：輸入 API Key
+# 側邊欄：輸入 API Key 與 選擇模型
 with st.sidebar:
     st.header("🔑 設定")
     user_api_key = st.text_input("請輸入 Gemini API Key", type="password", help="請前往 Google AI Studio 申請")
+    
+    # 新增：模型選擇器
+    model_options = [
+        "gemini-1.5-flash", 
+        "gemini-1.5-pro", 
+        "gemini-2.0-flash-exp"
+    ]
+    selected_model = st.selectbox(
+        "🤖 選擇 AI 模型", 
+        model_options, 
+        index=0,
+        help="Flash 速度快且免費額度高；Pro 分析能力更強但速度稍慢。"
+    )
+    
     st.markdown("---")
     st.info("💡 提示：請上傳包含 5 個分頁 (國文, 英文, 數學, 社會, 自然) 的 Excel 檔案。")
 
@@ -232,8 +248,8 @@ if uploaded_file and user_api_key:
                     progress_bar.progress(progress)
                     status_text.text(f"正在分析：{student} ({i+1}/{total_students})...")
                     
-                    # AI 生成
-                    advice = get_ai_advice(user_api_key, student, str(errors))
+                    # AI 生成 (傳入選擇的模型)
+                    advice = get_ai_advice(user_api_key, selected_model, student, str(errors))
                     
                     # Word 生成
                     word_data = create_word(student, advice)
@@ -241,7 +257,7 @@ if uploaded_file and user_api_key:
                     # 加入 ZIP
                     zf.writestr(f"{student}_讀書建議.docx", word_data.getvalue())
                     
-                    # 稍微休息一下避免 API 限制 (每秒約 1 次)
+                    # 稍微休息一下避免 API 限制
                     time.sleep(1)
             
             progress_bar.progress(100)
