@@ -9,11 +9,11 @@ import zipfile
 import time
 
 # ==========================================
-# 專案：班級讀書建議生成器 (智慧模型篩選版)
+# 專案：班級讀書建議生成器 (最終完整版)
 # 功能：
 # 1. 讀取 Excel (5分頁)
-# 2. 自動篩選 API Key 可用的 Text-out 模型 (排除 Vision/Embedding)
-# 3. AI 生成建議 (GEM 嚴格提示詞)
+# 2. 自動篩選 API Key 可用的 Text-out 模型
+# 3. AI 生成建議 (使用 GEM 嚴格提示詞)
 # 4. 產出 Word 檔 (.docx)
 # ==========================================
 
@@ -43,7 +43,6 @@ def get_available_models(api_key):
                 # 條件 2: 必須是 Gemini 系列
                 if 'gemini' in m.name:
                     # 條件 3: 排除舊版純視覺模型 (vision) 和 向量模型 (embedding)
-                    # 因為 gemini-pro-vision 不支援純文字輸入，會導致報錯
                     if 'vision' not in m.name and 'embedding' not in m.name:
                         # 移除 'models/' 前綴，讓選單更乾淨
                         clean_name = m.name.replace('models/', '')
@@ -132,7 +131,9 @@ def get_ai_advice(api_key, model_name, student_name, error_data):
         # 使用使用者選擇的模型
         model = genai.GenerativeModel(model_name)
         
-        # 這是 GEM 嚴格版提示詞
+        # ==========================================
+        # ⚠️ GEM 嚴格版提示詞 (一字不漏置入)
+        # ==========================================
         prompt = f"""
         你是一位專業的台灣國中教育會考升學輔導專家。你的任務是讀取以下學生的錯題數據（九年級第2次複習考，範圍1-4冊），並生成一份精準的讀書建議報告。
 
