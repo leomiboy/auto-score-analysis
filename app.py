@@ -9,10 +9,10 @@ import zipfile
 import time
 
 # ==========================================
-# 專案：班級讀書建議生成器 (動態模型版)
+# 專案：班級讀書建議生成器 (智慧模型篩選版)
 # 功能：
 # 1. 讀取 Excel (5分頁)
-# 2. 自動偵測 API Key 可用的模型列表
+# 2. 自動篩選 API Key 可用的 Text-out 模型 (排除 Vision/Embedding)
 # 3. AI 生成建議 (GEM 嚴格提示詞)
 # 4. 產出 Word 檔 (.docx)
 # ==========================================
@@ -22,7 +22,7 @@ st.set_page_config(page_title="班級讀書建議生成器", layout="wide")
 st.title("🎓 班級錯題分析與讀書建議生成器 (Word版)")
 st.markdown("""
 此工具協助老師快速生成全班學生的個別化讀書建議 **Word 檔**。
-1. 輸入您的 **Gemini API Key** (系統會自動抓取可用模型)。
+1. 輸入您的 **Gemini API Key** (系統會自動搜尋可用的文字生成模型)。
 2. 上傳 **Excel 檔案** (需包含 國文, 英文, 數學, 社會, 自然 5個分頁)。
 3. 系統將自動分析並打包 ZIP 下載。
 """)
@@ -32,18 +32,24 @@ st.markdown("""
 def get_available_models(api_key):
     """
     使用使用者的 API Key 查詢 Google 帳號下可用的模型列表
+    並進行嚴格篩選：只保留 Free Tier 常用的 Text-out 模型
     """
     try:
         genai.configure(api_key=api_key)
         model_list = []
         for m in genai.list_models():
-            # 過濾條件：
-            # 1. 必須支援 'generateContent' (生成內容)
-            # 2. 名稱包含 'gemini' (排除舊版 PaLM 模型)
+            # 條件 1: 必須支援 'generateContent' (內容生成)
             if 'generateContent' in m.supported_generation_methods:
+                # 條件 2: 必須是 Gemini 系列
                 if 'gemini' in m.name:
-                    model_list.append(m.name)
-        # 排序，讓列表整齊
+                    # 條件 3: 排除舊版純視覺模型 (vision) 和 向量模型 (embedding)
+                    # 因為 gemini-pro-vision 不支援純文字輸入，會導致報錯
+                    if 'vision' not in m.name and 'embedding' not in m.name:
+                        # 移除 'models/' 前綴，讓選單更乾淨
+                        clean_name = m.name.replace('models/', '')
+                        model_list.append(clean_name)
+        
+        # 排序：讓版本號新的 (如 1.5, 2.0) 排在前面
         model_list.sort(reverse=True) 
         return model_list
     except Exception as e:
@@ -66,11 +72,13 @@ def process_excel_data(uploaded_file):
     # 讀取所有資料
     data_map = {}
     for sheet in required_sheets:
+        # header=None 代表不使用第一列當標題，我們依索引讀取
         data_map[sheet] = pd.read_excel(xls, sheet_name=sheet, header=None)
 
     # 取得學生名單 (以國文科為準)
     try:
         first_df = data_map["國文"]
+        # 假設第 6 列 (Index 5) 的 B 欄 (Index 1) 是姓名
         student_list = first_df.iloc[5:, 1].dropna().unique().tolist()
     except Exception as e:
         return None, f"無法讀取學生名單，請確認 Excel 格式 (錯誤訊息: {e})"
@@ -102,6 +110,7 @@ def process_excel_data(uploaded_file):
                 errors = []
                 for ans, cat, kp, qn in zip(answers, categories, k_points, q_nums):
                     ans_str = str(ans).strip()
+                    # 錯題判斷：不是 "-" 且不是空白
                     if ans_str != "-" and pd.notna(ans) and ans_str != "":
                         errors.append({
                             "題號": qn,
@@ -201,6 +210,7 @@ def create_word(student_name, ai_advice):
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
     # 2. 處理 AI 建議內容
+    # 簡單清理 Markdown 符號
     clean_text = ai_advice.replace('**', '').replace('## ', '').replace('### ', '')
     
     for paragraph_text in clean_text.split('\n'):
@@ -234,10 +244,10 @@ with st.sidebar:
                 "🤖 請選擇 AI 模型", 
                 available_models,
                 index=0,
-                help="列表會根據您的 API Key 權限自動更新"
+                help="已自動過濾掉不支援文字生成的模型 (如 Vision/Embedding)"
             )
         else:
-            st.error("無法獲取模型列表，請檢查 API Key 是否正確或已啟用權限。")
+            st.error("無法獲取模型列表，請檢查 API Key 是否正確。")
     
     st.markdown("---")
     st.info("💡 提示：請上傳包含 5 個分頁 (國文, 英文, 數學, 社會, 自然) 的 Excel 檔案。")
@@ -245,7 +255,6 @@ with st.sidebar:
 # 主畫面：上傳檔案
 uploaded_file = st.file_uploader("📂 上傳 Excel 檔案 (.xlsx)", type=['xlsx'])
 
-# 執行條件：有檔案 + 有 API Key + 有選到模型
 if uploaded_file and user_api_key and selected_model:
     if st.button("🚀 開始生成全班報告 (Word)"):
         
