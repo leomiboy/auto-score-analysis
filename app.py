@@ -1,65 +1,46 @@
 import streamlit as st
 import pandas as pd
 import google.generativeai as genai
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib import colors
-from reportlab.lib.units import cm
+from docx import Document
+from docx.shared import Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 import io
 import zipfile
-import os
-import requests
+import time
 
 # ==========================================
-# 專案：班級讀書建議生成器 (Excel版)
+# 專案：班級讀書建議生成器 (Word 純淨版)
 # 功能：
-# 1. 網頁介面，讓不同老師輸入自己的 API Key
-# 2. 讀取單一 Excel 檔 (含5個分頁)
-# 3. 產出簡潔版 PDF (僅姓名 + 建議)
+# 1. 讀取 Excel (5分頁)
+# 2. AI 生成建議
+# 3. 產出 Word 檔 (.docx)
 # ==========================================
 
 # --- 1. 網頁設定 ---
 st.set_page_config(page_title="班級讀書建議生成器", layout="wide")
-st.title("🎓 班級錯題分析與讀書建議生成器")
+st.title("🎓 班級錯題分析與讀書建議生成器 (Word版)")
 st.markdown("""
-此工具協助老師快速生成全班學生的個別化讀書建議 PDF。
+此工具協助老師快速生成全班學生的個別化讀書建議 **Word 檔**。
 1. 輸入您的 **Gemini API Key**。
 2. 上傳 **Excel 檔案** (需包含 國文, 英文, 數學, 社會, 自然 5個分頁)。
-3. 系統將自動分析並打包 PDF 下載。
+3. 系統將自動分析並打包 ZIP 下載。
 """)
 
-# --- 2. 系統字型處理 (解決 PDF 中文亂碼) ---
-@st.cache_resource
-def download_font():
-    """下載中文字型到系統暫存區"""
-    font_url = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansTC/NotoSansTC-Regular.ttf"
-    font_path = "NotoSansTC-Regular.ttf"
-    if not os.path.exists(font_path):
-        with st.spinner("正在下載中文字型資源..."):
-            response = requests.get(font_url)
-            with open(font_path, "wb") as f:
-                f.write(response.content)
-    return font_path
-
-try:
-    font_path = download_font()
-    pdfmetrics.registerFont(TTFont('NotoSans', font_path))
-except Exception as e:
-    st.error(f"字型載入失敗: {e}")
-
-# --- 3. 核心邏輯函式 ---
+# --- 2. 核心邏輯函式 ---
 
 def process_excel_data(uploaded_file):
     """讀取 Excel 並整理所有學生的錯題"""
-    # 讀取 Excel 所有分頁
-    xls = pd.ExcelFile(uploaded_file)
-    
+    try:
+        xls = pd.ExcelFile(uploaded_file)
+    except Exception:
+        return None, "檔案格式錯誤，請確認上傳的是 .xlsx Excel 檔案。"
+
     # 檢查分頁是否齊全
     required_sheets = ["國文", "英文", "數學", "社會", "自然"]
-    if not all(sheet in xls.sheet_names for sheet in required_sheets):
-        return None, f"Excel 缺少必要分頁，請確認包含：{required_sheets}"
+    missing_sheets = [sheet for sheet in required_sheets if sheet not in xls.sheet_names]
+    
+    if missing_sheets:
+        return None, f"Excel 缺少必要分頁：{missing_sheets}，請確認分頁名稱正確。"
 
     # 讀取所有資料
     data_map = {}
@@ -67,10 +48,14 @@ def process_excel_data(uploaded_file):
         # header=None 代表不使用第一列當標題，我們依索引讀取
         data_map[sheet] = pd.read_excel(xls, sheet_name=sheet, header=None)
 
-    # 取得學生名單 (以國文科為準，假設第6列開始是學生)
-    first_df = data_map["國文"]
-    # 第 6 列 (Index 5) 的 B 欄 (Index 1) 是姓名
-    student_list = first_df.iloc[5:, 1].dropna().unique().tolist()
+    # 取得學生名單 (以國文科為準)
+    try:
+        first_df = data_map["國文"]
+        # 假設第 6 列 (Index 5) 的 B 欄 (Index 1) 是姓名
+        # dropna() 去除空值，unique() 去除重複
+        student_list = first_df.iloc[5:, 1].dropna().unique().tolist()
+    except Exception as e:
+        return None, f"無法讀取學生名單，請確認 Excel 格式 (錯誤訊息: {e})"
     
     # 整理每位學生的錯題
     all_students_data = {}
@@ -81,15 +66,12 @@ def process_excel_data(uploaded_file):
             df = data_map[subject]
             try:
                 # 解析結構
-                # Row 0: 題號, Row 1: 分類, Row 2: 知識點
                 q_nums = df.iloc[0, 2:].values
                 categories = df.iloc[1, 2:].values
                 k_points = df.iloc[2, 2:].values
                 
                 # 找學生列
-                # 先把資料轉成 DataFrame 方便搜尋
                 student_df_temp = df.iloc[5:, 1:].reset_index(drop=True)
-                # 重新命名欄位以便搜尋：第一欄設為 Name
                 student_df_temp.columns = ["Name"] + [i for i in range(len(student_df_temp.columns)-1)]
                 
                 target_row = student_df_temp[student_df_temp["Name"] == student]
@@ -119,76 +101,54 @@ def process_excel_data(uploaded_file):
 
 def get_ai_advice(api_key, student_name, error_data):
     """呼叫 Gemini 生成建議"""
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    
-    prompt = f"""
-    你是一位專業的國中會考升學輔導專家。請根據以下學生的錯題數據，撰寫一份精準的讀書建議。
-
-    學生姓名：{student_name} (請在文中稱呼為「你」)
-    錯題數據：{error_data}
-
-    請嚴格遵守以下規則：
-    1. **直接開始**：不要有開場白，不要打招呼。
-    2. **格式**：請使用 Markdown 格式。
-    3. **內容結構**：
-       ## 一、 整體表現總評
-       (分析強弱科與關鍵弱點)
-       ## 二、 分科深度分析與建議
-       (針對有錯題的科目，列出弱點領域並給予具體建議)
-    4. **語氣**：溫暖、鼓勵且專業。
-    """
     try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        prompt = f"""
+        你是一位專業的國中會考升學輔導專家。請根據以下學生的錯題數據，撰寫一份精準的讀書建議。
+
+        學生姓名：{student_name} (請在文中稱呼為「你」)
+        錯題數據：{error_data}
+
+        請嚴格遵守以下規則：
+        1. **直接開始**：不要有開場白，不要打招呼。
+        2. **格式**：請使用 Markdown 格式。
+        3. **內容結構**：
+        ## 一、 整體表現總評
+        (分析強弱科與關鍵弱點)
+        ## 二、 分科深度分析與建議
+        (針對有錯題的科目，列出弱點領域並給予具體建議)
+        4. **語氣**：溫暖、鼓勵且專業。
+        """
+        
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"AI 分析連線失敗: {e}"
+        return f"AI 分析連線失敗: {e} (請檢查 API Key 是否正確)"
 
-def create_pdf(student_name, ai_advice):
+def create_word(student_name, ai_advice):
     """
-    繪製 PDF
-    修改：移除第一頁錯題表，移除 AI 標題，只保留姓名與建議
+    建立 Word 文件 (.docx)
     """
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
+    doc = Document()
     
-    # --- 標題：學生姓名 ---
-    c.setFont("NotoSans", 24)
-    # 畫在頁面頂端
-    c.drawString(2*cm, height - 3*cm, f"📊 {student_name} - 讀書建議報告")
+    # 1. 加入標題
+    title = doc.add_heading(f"{student_name} - 讀書建議報告", 0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
-    # --- 內容：AI 建議 ---
-    c.setFont("NotoSans", 11)
-    
-    # 文字換行處理
-    text_object = c.beginText(2*cm, height - 5*cm)
-    text_object.setFont("NotoSans", 11)
-    text_object.setLeading(16) # 行距
-    
-    # 簡易 Markdown 清理與換行
-    max_char = 45 # 每行約 45 個中文字
-    
+    # 2. 處理 AI 建議內容
+    # 簡單清理 Markdown 符號，讓 Word 看起來乾淨點
     clean_text = ai_advice.replace('**', '').replace('## ', '').replace('### ', '')
     
-    for paragraph in clean_text.split('\n'):
-        # 處理過長的段落
-        while len(paragraph) > 0:
-            line = paragraph[:max_char]
-            paragraph = paragraph[max_char:]
-            text_object.textLine(line)
+    for paragraph_text in clean_text.split('\n'):
+        if paragraph_text.strip():
+            p = doc.add_paragraph(paragraph_text)
+            p.style.font.size = Pt(12)
             
-            # 換頁檢查
-            if text_object.getY() < 3*cm:
-                c.drawText(text_object)
-                c.showPage() # 換頁
-                # 新頁面設定
-                text_object = c.beginText(2*cm, height - 3*cm)
-                text_object.setFont("NotoSans", 11)
-                text_object.setLeading(16)
-                
-    c.drawText(text_object)
-    c.save()
+    # 3. 存入記憶體 Buffer
+    buffer = io.BytesIO()
+    doc.save(buffer)
     buffer.seek(0)
     return buffer
 
@@ -199,13 +159,13 @@ with st.sidebar:
     st.header("🔑 設定")
     user_api_key = st.text_input("請輸入 Gemini API Key", type="password", help="請前往 Google AI Studio 申請")
     st.markdown("---")
-    st.info("💡 提示：Excel 檔名建議為「五科數據.xlsx」，且必須包含 國文, 英文, 數學, 社會, 自然 五個分頁。")
+    st.info("💡 提示：請上傳包含 5 個分頁 (國文, 英文, 數學, 社會, 自然) 的 Excel 檔案。")
 
 # 主畫面：上傳檔案
 uploaded_file = st.file_uploader("📂 上傳 Excel 檔案 (.xlsx)", type=['xlsx'])
 
 if uploaded_file and user_api_key:
-    if st.button("🚀 開始生成全班報告"):
+    if st.button("🚀 開始生成全班報告 (Word)"):
         
         status_text = st.empty()
         progress_bar = st.progress(0)
@@ -231,11 +191,14 @@ if uploaded_file and user_api_key:
                     # AI 生成
                     advice = get_ai_advice(user_api_key, student, str(errors))
                     
-                    # PDF 生成
-                    pdf_data = create_pdf(student, advice)
+                    # Word 生成
+                    word_data = create_word(student, advice)
                     
                     # 加入 ZIP
-                    zf.writestr(f"{student}_讀書建議.pdf", pdf_data.getvalue())
+                    zf.writestr(f"{student}_讀書建議.docx", word_data.getvalue())
+                    
+                    # 稍微休息一下避免 API 限制 (每秒約 1 次)
+                    time.sleep(1)
             
             progress_bar.progress(100)
             status_text.success("✅ 生成完成！")
@@ -244,7 +207,7 @@ if uploaded_file and user_api_key:
             st.download_button(
                 label="📥 下載全班報告 (ZIP)",
                 data=zip_buffer.getvalue(),
-                file_name="全班讀書建議報告.zip",
+                file_name="全班讀書建議報告_Word.zip",
                 mime="application/zip"
             )
 
